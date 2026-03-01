@@ -250,14 +250,14 @@ int coff_run(unsigned char *obj_buf, DWORD obj_size)
 
 	unsigned i;
 
-	// Start area of our imp implementation
-	imp_area = obj_buf + obj_size + 0x1000;
-
 	// Start address of array of imp addresses
-	imp_addrs = obj_buf + obj_size + 0x2000;
+	imp_addrs = obj_buf + obj_size + 0x1000;
+
+	// Start area of our external plugs
+	imp_area = obj_buf + obj_size + 0x2000;
 
 	int dont_run = 0;						// Indicates that something went wrong during processing, won't run this object
-	int do_run = 0;
+	int sect_idx = -1;
 
 	// Set up necessary ponters
 
@@ -282,42 +282,33 @@ int coff_run(unsigned char *obj_buf, DWORD obj_size)
 		// Skip not interesting ections (not code)
 		// (!) Actually COFF spec says that .text is part of reserved sections, so we can follow only .text/.text$N named sections,
 		// instead of IMAGE_SCN_CNT_CODE Characteristicss
+		//
+		// (!?) We well need to resolve also relocations in initialized data - there may be pointers with relocated
+		// imports or lib externs. May be we can get away with this for POC, for field applicable version need to take care
+		//
 
-		if (memcmp((pish+i)->Name, ".text", strlen(".text")))
+		if (memcmp((pish + i)->Name, ".text", strlen(".text")))
 			continue;
 
 		// Got .text[$X]. Dump what we have
 
 		// Dump IMAGE_SECTION_HEADERs
 		printf("IMAGE_SECTION_HEADER #%u:\n", i + 1);		// Section indexes are 1-based, so this is more informative
-		printf("	Name = '%s'\n", (pish+i)->Name);	
-		printf("	Misc.VirtualSize = %08X\n", (pish+i)->Misc.VirtualSize);
-		printf("	VirtualAddress = %08X\n", (pish+i)->VirtualAddress);
-		printf("	SizeOfRawData = %08X\n", (pish+i)->SizeOfRawData);
-		printf("	PointerToRawData = %08X\n", (pish+i)->PointerToRawData);
-
-		// Dump section raw data (don't)
-
-		// Dump relocations raw data (don't)
-/*
-		printf("		Relocations raw dump:\n");
-		printf("			");
-		for(j = 0; j < (pish+i)->NumberOfRelocations * sizeof(RELOC_REC); ++j)
-			printf("%02hhX ", *((unsigned char*)preloc + j));
-		printf("\n");
-		printf("\n");
-*/
-
-		printf("	PointerToRelocations = %08X\n", (pish+i)->PointerToRelocations);
-		printf("	PointerToLinenumbers = %08X\n", (pish+i)->PointerToLinenumbers);
-		printf("	NumberOfRelocations = %04hX\n", (pish+i)->NumberOfRelocations);
-		printf("	NumberOfLinenumbers = %04hX\n", (pish+i)->NumberOfLinenumbers);
+		printf("	Name = '%s'\n", (pish + i)->Name);
+		printf("	Misc.VirtualSize = %08X\n", (pish + i)->Misc.VirtualSize);
+		printf("	VirtualAddress = %08X\n", (pish + i)->VirtualAddress);
+		printf("	SizeOfRawData = %08X\n", (pish + i)->SizeOfRawData);
+		printf("	PointerToRawData = %08X\n", (pish + i)->PointerToRawData);
+		printf("	PointerToRelocations = %08X\n", (pish + i)->PointerToRelocations);
+		printf("	PointerToLinenumbers = %08X\n", (pish + i)->PointerToLinenumbers);
+		printf("	NumberOfRelocations = %04hX\n", (pish + i)->NumberOfRelocations);
+		printf("	NumberOfLinenumbers = %04hX\n", (pish + i)->NumberOfLinenumbers);
 
 		// Dump relocatioins
 
-		preloc = (struct _RELOC_REC*)((obj_buf + (pish+i)->PointerToRelocations));
+		preloc = (struct _RELOC_REC*)((obj_buf + (pish + i)->PointerToRelocations));
 
-		for(j = 0; j < (pish+i)->NumberOfRelocations; ++j)
+		for (j = 0; j < (pish + i)->NumberOfRelocations; ++j)
 		{
 			DWORD stab_idx;
 			unsigned char *paddr;
@@ -327,70 +318,70 @@ int coff_run(unsigned char *obj_buf, DWORD obj_size)
 			char name[256];
 
 			printf("\n");
-			printf("		Relocation:\n");	
-			printf("			VirtualAddress = %08X\n", (preloc+j)->VirtualAddress);
-			printf("			SymbolTableIndex = %08X\n", (preloc+j)->SymbolTableIndex);
-			printf("			Type = %04hX\n", (preloc+j)->Type);
+			printf("		Relocation:\n");
+			printf("			VirtualAddress = %08X\n", (preloc + j)->VirtualAddress);
+			printf("			SymbolTableIndex = %08X\n", (preloc + j)->SymbolTableIndex);
+			printf("			Type = %04hX\n", (preloc + j)->Type);
 
-// For relative function calls we expect to see this (from COFF spec)
-// (?) data relocs from another section of this object? Probably the same or IMAGE_REL_AMD64_REL32_N, data are referred to as RIP-related
+			// For relative function calls we expect to see this (from COFF spec)
+			// (?) data relocs from another section of this object? Probably the same or IMAGE_REL_AMD64_REL32_N, data are referred to as RIP-related
 
-/**
-IMAGE_REL_AMD64_REL32
-0x0004
-The 32-bit relative address from the byte following the relocation.
-*/
-			if ((preloc+j)->Type != IMAGE_REL_AMD64_REL32)
+			/**
+			IMAGE_REL_AMD64_REL32
+			0x0004
+			The 32-bit relative address from the byte following the relocation.
+			*/
+			if ((preloc + j)->Type != IMAGE_REL_AMD64_REL32)
 			{
 				dont_run = 1;
 				continue;
 			}
 
 			// Dump what we have in symtab
-			stab_idx = (preloc+j)->SymbolTableIndex;
-			paddr = obj_buf + (pish+i)->PointerToRawData + (preloc+j)->VirtualAddress;
+			stab_idx = (preloc + j)->SymbolTableIndex;
+			paddr = obj_buf + (pish + i)->PointerToRawData + (preloc + j)->VirtualAddress;
 			printf("1 --- [paddr] = %08X\n", *((DWORD*)paddr));
 
-//////////////////////////////////////////////////////////////////////
+			//////////////////////////////////////////////////////////////////////
 			printf("SymRec #%u:\n", stab_idx);
 
-			if (*(DWORD*)(psym+stab_idx)->Name != 0)
+			if (*(DWORD*)(psym + stab_idx)->Name != 0)
 			{
-				memcpy(_name, (psym+stab_idx)->Name, 8);
+				memcpy(_name, (psym + stab_idx)->Name, 8);
 				_name[8] = '\0';
-				printf("	Name = '%s' (%016llX)\n", _name, *(uint64_t*)(psym+stab_idx)->Name);
+				printf("	Name = '%s' (%016llX)\n", _name, *(uint64_t*)(psym + stab_idx)->Name);
 				strcpy(name, _name);
 			}
 			else
 			{
-				unsigned str_offs = *(DWORD*)((psym+stab_idx)->Name + 4);
+				unsigned str_offs = *(DWORD*)((psym + stab_idx)->Name + 4);
 
 				printf("[str_offs = %08X]\n", str_offs);
 				printf("	Name = '%s'\n", pstr_tbl + str_offs);
 				strcpy(name, pstr_tbl + str_offs);
 			}
-			printf("	Value = %08X\n", (psym+stab_idx)->Value);
-			printf("	SectionNumber = %04hX\n", (psym+stab_idx)->SectionNumber);
-			printf("	Type = %04hX	[", (psym+stab_idx)->Type);
+			printf("	Value = %08X\n", (psym + stab_idx)->Value);
+			printf("	SectionNumber = %04hX\n", (psym + stab_idx)->SectionNumber);
+			printf("	Type = %04hX	[", (psym + stab_idx)->Type);
 			// Print LSB
-			byte_val = (BYTE)(psym+stab_idx)->Type;
+			byte_val = (BYTE)(psym + stab_idx)->Type;
 			if (byte_val > num_type_vals)
 				printf("BAD");
 			else
 				printf("%s", type_vals[byte_val]);
 			printf(", ");
 			// Print MSB
-			byte_val = (BYTE)((psym+stab_idx)->Type >> 8);
+			byte_val = (BYTE)((psym + stab_idx)->Type >> 8);
 			if (byte_val > num_type_msb_vals)
 				printf("BAD");
 			else
 				printf("%s", type_msb_vals[byte_val]);
 			printf("]\n");
 
-			printf("	StorageClass = %02hhX	[", (psym+stab_idx)->StorageClass);
+			printf("	StorageClass = %02hhX	[", (psym + stab_idx)->StorageClass);
 			for (k = 0; k < num_stor_class_vals; ++k)
 			{
-				if (stor_class_vals[k].val == (psym+stab_idx)->StorageClass)
+				if (stor_class_vals[k].val == (psym + stab_idx)->StorageClass)
 				{
 					printf("%s", stor_class_vals[k].val_str);
 					break;
@@ -400,144 +391,112 @@ The 32-bit relative address from the byte following the relocation.
 			if (k == num_stor_class_vals)
 				printf("BAD");
 			printf("]");
-			
+
 			// Print undefined external
-			if ((psym+stab_idx)->StorageClass == IMAGE_SYM_CLASS_EXTERNAL && !(psym+stab_idx)->SectionNumber)
+			if ((psym + stab_idx)->StorageClass == IMAGE_SYM_CLASS_EXTERNAL && !(psym + stab_idx)->SectionNumber)
 				printf("[IMAGE_SYM_UNDEFINED]");
 
 			printf("\n");
-			
-			printf("	NumberOfAuxSymbols = %02hhX\n", (psym+stab_idx)->NumberOfAuxSymbols);
+
+			printf("	NumberOfAuxSymbols = %02hhX\n", (psym + stab_idx)->NumberOfAuxSymbols);
 			printf("\n");
 
-//////////////////////////////////////////////////////////////////////
+			//////////////////////////////////////////////////////////////////////
 
+			//
 			// Try to resolve.
+			//
 
 			// IMAGE_SYM_CLASS_STATIC is something that is defined in this object file. Like static variable
 
-			if ((psym+stab_idx)->StorageClass == IMAGE_SYM_CLASS_STATIC)
+			if ((psym + stab_idx)->StorageClass == IMAGE_SYM_CLASS_STATIC)
 			{
 				unsigned char *pdata;
-				unsigned sect_idx;			// Zero-based for reference. In symtbl it's 1-based, so that section 0 means UNDEF
 
-resolve_local:
-//----------------- Looks good, relocations show right data
+			resolve_local:
 				printf("Trying to resolve\n");
 
-				sect_idx = (psym+stab_idx)->SectionNumber - 1;
-				pdata = obj_buf + (pish+sect_idx)->PointerToRawData + (psym+stab_idx)->Value;
-//				printf("[pdata] = '%s'\n", pdata);
-				
-				// (!) Interestingly, static data are accessed as RIP-relative
-				*(DWORD*)paddr = pdata - (paddr+4);
-				printf("2 --- [paddr] = %08X\n", *(DWORD*)paddr);
-				printf("2 --- data = '%s'\n", paddr+4+*(DWORD*)paddr);
+				sect_idx = (psym + stab_idx)->SectionNumber - 1;
+				pdata = obj_buf + (pish + sect_idx)->PointerToRawData + (psym + stab_idx)->Value;
 
+				// (!) Interestingly, static data are accessed as RIP-relative
+				*(DWORD*)paddr = pdata - (paddr + 4);
 			}
-			else if ((psym+stab_idx)->StorageClass == IMAGE_SYM_CLASS_EXTERNAL)
+			else if ((psym + stab_idx)->StorageClass == IMAGE_SYM_CLASS_EXTERNAL)
 			{
-				unsigned char *pdata;
-				unsigned sect_idx;		
-				
+
 				// If storage is EXTERNAL but SectionNumber is not 0, the target has to be in this object.
 				// No idea what this case should mean (and whether it indeed happens), but looks like we just resolve it
 				// the same way as STATIC
-				if ((psym+stab_idx)->SectionNumber != 0)
-					 goto resolve_local;
+				// (!) This is an untested flow
+				if ((psym + stab_idx)->SectionNumber != 0)
+					goto resolve_local;
 
 				// UNDEF
-				
+
 				printf("Trying to resolve\n");
-				
-				// Meanwhile we only have a single undef external and only one ref to it.
+
+				// TODO: Meanwhile we only have a single undef external and only one ref to it.
 				// Later we will need to keep a list of already resolved externals and pointer to end of imp area (growing)
 				if (!memcmp(name, "__imp__", strlen("__imp_")))
 				{
+					// TODO: if fails, also try "kerrnel32.dll" and "gdi32.dll". And "ntdll.dll" for Nt/Zw imports
 					void *proc_addr = GetProcAddress(LoadLibraryA("user32.dll"), name + strlen("__imp_"));
 
-/*
-					// We have a relocation in our imp_plug, resolve it
-					printf("proc_addr = %p, proc_name = '%s'\n", proc_addr, name + strlen("__imp_"));
-printf("111 --- %16llX\n", *(uint64_t*)(imp_area + imp_area_offs + imp_plug_addr_offs));
-					memcpy(imp_area + imp_area_offs, imp_plug, imp_plug_size);
-printf("222 --- %16llX\n", *(uint64_t*)(imp_area + imp_area_offs + imp_plug_addr_offs));
-					*(uint64_t*)(imp_area + imp_area_offs + imp_plug_addr_offs) = (uint64_t)proc_addr;
-printf(" --- %16llX\n", *(uint64_t*)(imp_area + imp_area_offs + imp_plug_addr_offs));
-*/
-
-//					sect_idx = (psym+stab_idx)->SectionNumber - 1;
-					// pdata is target for the call of this COFF relocation
-//					pdata = imp_area + imp_area_offs;
-//					printf("[pdata] = '%llx'\n", *(uint64_t*)pdata);
-
 					// Resolve COFF relocation
-//					*(DWORD*)paddr = pdata - (paddr+4);
 
 					// (!) This is *not* a relative call, it's indirect call with imm32 address RIP-relative
-//					*(DWORD*)paddr = (char*)proc_addr - (paddr+4);
 					*(uint64_t*)(imp_addrs + imp_addrs_offs) = (uint64_t)proc_addr;
 					*(DWORD*)paddr = (char*)(imp_addrs + imp_addrs_offs) - (paddr + 4);
 					imp_addrs_offs += sizeof(uint64_t);
-
-					printf("2 --- [paddr] = %08X\n", *(DWORD*)paddr);
-					printf("2 --- data = %016llX\n", *(uint64_t*)(paddr+4+*(DWORD*)paddr));					
-
-//					imp_area_offs += imp_plug_size;
-					do_run = 1;
-
-					// Now let's try to run it. Our entry point is either 0 (start for .text) or a symbol from symtbl (like main, though here it's also 0. When main is not the first function to appear it will probably be more interesting)
-//					entry_point = (int(*)())(obj_buf + (pish+i)->PointerToRawData);
-					start = (int(*)())(obj_buf + (pish+i)->PointerToRawData);
-printf("start = %p\n", start);
-
-					// Let's try to run it
-//					entry_point();
-
-					// It crashes. Let's check first that our obj_buf is indeed executable
-//					entry_point = (int(*)())(imp_area + imp_plug_size - 1);
-//					printf("entry_point = %p, data = %02hhX\n", entry_point, *((char*)entry_point));
-//					entry_point();
-
-/*
-					// It is executable. Now let's check if all our plug in imps work
-					entry_point = (int(*)())(imp_area);
-					printf("entry_point = %p, data = \n", entry_point);
-					for (k = 0; k < imp_plug_size; ++k)
-printf("%02hhX ", *((char*)entry_point + k));
-					printf("\n");
-*/
-					// It looks right. Let's try to run it
-//					entry_point();
-					start();
-
-					// It crashes. Something is wrong with the function that we call.
-					// No-no. We just call MessageBoxA without params, what should it do?
-
-//					entry_point(NULL, "Content", "Title", 0);
-					// Crashes. Problems with calling convention?
-
-//					entry_point = proc_addr;
-//					entry_point(NULL, "Content", "Title", 0);
-					// Works. so our proc_addr is right. 
-
-					// So what's wrong? r14 is not safe to scramble? Let's try RAX, MessageBox anyway returns a value
-//					entry_point(NULL, "Content", "Title", 0);
-					// Crash. So it's our code in plug that crashes. Why?
-					
 				}
 				else
 				{
-					dont_run = 1;
+					void *proc_addr;
+
+					// This we will probably change to names/addresses table
+					if (!strcmp(name, "printf"))
+					{
+						proc_addr = (void*)printf;
+						int(*p)() = (int(*)())proc_addr;
+
+						printf("proc_addr = %p\n", proc_addr);
+
+						p("Hello...");
+
+						// We have our own relocation in imp_plug, resolve it
+
+						// Copy plug and resolve its call
+						memcpy(imp_area + imp_area_offs, imp_plug, imp_plug_size);
+						*(uint64_t*)(imp_area + imp_area_offs + imp_plug_addr_offs) =
+							(uint64_t)proc_addr;
+
+						// Resolve COFF reloc to the plug code
+						*(DWORD*)paddr = (char*)(imp_area + imp_area_offs) - (paddr + 4);
+						imp_area_offs += imp_plug_size;
+					}
+					else
+					{
+						printf("Don't know how to resolve '%s'. Will not run COFF\n", name);
+					}
 				}
 			}
-
 		} // for (relocations)
 
+		// Only text[$Nn] section gets here
+		if (!dont_run)
+		{
+			// We assume a single code section
+			sect_idx = i;
+		}
 	} // for (sections)
 
-	//[...]
-
+	if (!dont_run)
+	{
+		start = (int(*)())(obj_buf + (pish + sect_idx)->PointerToRawData);
+		printf("start = %p\n", start);
+		start();
+	}
 
 	return 0;
 }
