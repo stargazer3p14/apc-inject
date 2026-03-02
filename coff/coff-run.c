@@ -72,6 +72,19 @@ unsigned imp_area_offs;
 unsigned char *imp_addrs;
 unsigned imp_addrs_offs;
 
+struct _resolved_local
+{
+	char *name;
+	void *addr;
+};
+
+struct _resolved_local resolved_locals[] =
+{
+	{"printf", printf}
+};
+
+const unsigned num_resolved_locals = sizeof(resolved_locals) / sizeof(resolved_locals[0]);
+
 typedef 
 int (*MessageBoxA_t)(
   HWND   hWnd,
@@ -440,8 +453,25 @@ int coff_run(unsigned char *obj_buf, DWORD obj_size)
 				// Later we will need to keep a list of already resolved externals and pointer to end of imp area (growing)
 				if (!memcmp(name, "__imp__", strlen("__imp_")))
 				{
-					// TODO: if fails, also try "kerrnel32.dll" and "gdi32.dll". And "ntdll.dll" for Nt/Zw imports
-					void *proc_addr = GetProcAddress(LoadLibraryA("user32.dll"), name + strlen("__imp_"));
+					// If fails, also try "kerrnel32.dll" and "gdi32.dll". And "ntdll.dll" for Nt/Zw imports
+					void *proc_addr;
+
+					// (!) This grows imp_addrs as many times as there are relocations - we don't reuse already resolved
+
+					proc_addr = GetProcAddress(LoadLibraryA("user32.dll"), name + strlen("__imp_"));
+					if (!proc_addr)
+						proc_addr = GetProcAddress(LoadLibraryA("kernel32.dll"), name + strlen("__imp_"));
+					if (!proc_addr)
+						proc_addr = GetProcAddress(LoadLibraryA("gdi32.dll"), name + strlen("__imp_"));
+					if (!proc_addr)
+						proc_addr = GetProcAddress(LoadLibraryA("ntdll.dll"), name + strlen("__imp_"));
+
+					if (!proc_addr)
+					{
+unresolved_quit:
+						fprintf(stderr, "Can't resolve '%s'\n", name);
+						exit(-1);
+					}
 
 					// Resolve COFF relocation
 
@@ -453,32 +483,34 @@ int coff_run(unsigned char *obj_buf, DWORD obj_size)
 				else
 				{
 					void *proc_addr;
+					struct _resolved_local *p_resolv;
+					unsigned x;
+
+					for (x = 0; x < num_resolved_locals; ++x)
+						if (!strcmp(name, resolved_locals[x].name))
+							break;
+					if (x == num_resolved_locals)
+						goto unresolved_quit;
 
 					// This we will probably change to names/addresses table
-					if (!strcmp(name, "printf"))
-					{
-						proc_addr = (void*)printf;
-						int(*p)() = (int(*)())proc_addr;
 
-						printf("proc_addr = %p\n", proc_addr);
+					proc_addr = (void*)printf;
+					int(*p)() = (int(*)())proc_addr;
 
-						p("Hello...");
+					printf("proc_addr = %p\n", proc_addr);
 
-						// We have our own relocation in imp_plug, resolve it
+					p("Hello...");
 
-						// Copy plug and resolve its call
-						memcpy(imp_area + imp_area_offs, imp_plug, imp_plug_size);
-						*(uint64_t*)(imp_area + imp_area_offs + imp_plug_addr_offs) =
-							(uint64_t)proc_addr;
+					// We have our own relocation in imp_plug, resolve it
 
-						// Resolve COFF reloc to the plug code
-						*(DWORD*)paddr = (char*)(imp_area + imp_area_offs) - (paddr + 4);
-						imp_area_offs += imp_plug_size;
-					}
-					else
-					{
-						printf("Don't know how to resolve '%s'. Will not run COFF\n", name);
-					}
+					// Copy plug and resolve its call
+					memcpy(imp_area + imp_area_offs, imp_plug, imp_plug_size);
+					*(uint64_t*)(imp_area + imp_area_offs + imp_plug_addr_offs) =
+						(uint64_t)proc_addr;
+
+					// Resolve COFF reloc to the plug code
+					*(DWORD*)paddr = (char*)(imp_area + imp_area_offs) - (paddr + 4);
+					imp_area_offs += imp_plug_size;
 				}
 			}
 		} // for (relocations)
@@ -508,13 +540,6 @@ int main(int argc, char **argv)
 	FILE *f;
 	unsigned long fsize;
 	unsigned char *obj_buf;
-
-int i;
-
-printf("%s():   main = %p, imp_plug = %p, imp_plug_size = %u, imp_plug_addr_offs = %u\n", __func__, main, imp_plug, imp_plug_size, imp_plug_addr_offs);
-for (i = 0; i < imp_plug_size; ++i)
-	printf("%02hhX ", *((unsigned char*)(imp_plug)+i));
-printf("\n");
 
 	// Params check
 	if (argc < 2)
