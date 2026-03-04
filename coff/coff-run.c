@@ -4,7 +4,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <windows.h>
-
+#include <TlHelp32.h>
 
 /**
 Source: MSDN
@@ -72,6 +72,10 @@ unsigned imp_area_offs;
 unsigned char *imp_addrs;
 unsigned imp_addrs_offs;
 
+
+void nop_func() {}
+int get_errno(void) { return errno; }
+
 struct _resolved_local
 {
 	char *name;
@@ -80,7 +84,30 @@ struct _resolved_local
 
 struct _resolved_local resolved_locals[] =
 {
-	{"printf", printf}
+	{"printf", printf},
+	{"__security_cookie", nop_func},
+	{"strcmp", strcmp},
+	{"__acrt_iob_func", nop_func},
+	{"exit", exit},
+	{"strcpy", strcpy},
+	{"fopen", fopen},
+	{"strerror", strerror},
+	{"fseek", fseek},
+	{"ftell", ftell},
+	{"malloc", malloc},
+	{"fread", fread},
+	{"fclose", fclose},
+	{"CreateToolhelp32Snapshot", CreateToolhelp32Snapshot},
+	{"Process32First", Process32First},
+	{"Process32Next", Process32Next},
+	{"Thread32First", Thread32First},
+	{"Thread32Next", Thread32Next},
+	{"__security_check_cookie", nop_func},
+	{"__stdio_common_vfprintf", vfprintf},
+	{"__stdio_common_vsscanf", vsscanf},
+	{"get_errno", get_errno},
+	{"?_OptionsStorage@?1??__local_stdio_printf_options@@9@9", nop_func},
+	{"?_OptionsStorage@?1??__local_stdio_scanf_options@@9@9", nop_func}
 };
 
 const unsigned num_resolved_locals = sizeof(resolved_locals) / sizeof(resolved_locals[0]);
@@ -96,6 +123,7 @@ int (*MessageBoxA_t)(
 //int (*entry_point)();
 MessageBoxA_t entry_point;
 int (*start)();
+int (*start_argv)();
 
 // Table of Type values [Source: COFF spec]
 
@@ -272,6 +300,8 @@ int coff_run(unsigned char *obj_buf, DWORD obj_size)
 	int dont_run = 0;						// Indicates that something went wrong during processing, won't run this object
 	int sect_idx = -1;
 
+	unsigned num_unresolv = 0;
+
 	// Set up necessary ponters
 
 	obj_offs = 0;
@@ -426,7 +456,7 @@ int coff_run(unsigned char *obj_buf, DWORD obj_size)
 			{
 				unsigned char *pdata;
 
-			resolve_local:
+resolve_local:
 				printf("Trying to resolve\n");
 
 				sect_idx = (psym + stab_idx)->SectionNumber - 1;
@@ -468,9 +498,11 @@ int coff_run(unsigned char *obj_buf, DWORD obj_size)
 
 					if (!proc_addr)
 					{
-unresolved_quit:
+unresolved:
 						fprintf(stderr, "Can't resolve '%s'\n", name);
-						exit(-1);
+//						exit(-1);
+						++num_unresolv;
+						continue;
 					}
 
 					// Resolve COFF relocation
@@ -479,6 +511,8 @@ unresolved_quit:
 					*(uint64_t*)(imp_addrs + imp_addrs_offs) = (uint64_t)proc_addr;
 					*(DWORD*)paddr = (char*)(imp_addrs + imp_addrs_offs) - (paddr + 4);
 					imp_addrs_offs += sizeof(uint64_t);
+
+					printf("+++ Resolved '%s' ==> %p\n", name, proc_addr);
 				}
 				else
 				{
@@ -490,16 +524,20 @@ unresolved_quit:
 						if (!strcmp(name, resolved_locals[x].name))
 							break;
 					if (x == num_resolved_locals)
-						goto unresolved_quit;
+						goto unresolved;
 
+					proc_addr = resolved_locals[x].addr;
+
+					// TODO: remove.
 					// This we will probably change to names/addresses table
-
+/*
 					proc_addr = (void*)printf;
 					int(*p)() = (int(*)())proc_addr;
 
 					printf("proc_addr = %p\n", proc_addr);
 
 					p("Hello...");
+*/
 
 					// We have our own relocation in imp_plug, resolve it
 
@@ -511,6 +549,8 @@ unresolved_quit:
 					// Resolve COFF reloc to the plug code
 					*(DWORD*)paddr = (char*)(imp_area + imp_area_offs) - (paddr + 4);
 					imp_area_offs += imp_plug_size;
+					
+					printf("+++ Resolved '%s' ==> %p\n", name, proc_addr);
 				}
 			}
 		} // for (relocations)
@@ -521,18 +561,65 @@ unresolved_quit:
 			// We assume a single code section
 			sect_idx = i;
 		}
+
+		// There's a case that compiler adds additional sections with the same name (e.g. ".text$mn") for
+		// all kinds of its built-ins. They appear after the "main" .text$mn section and at link stage are combined
+		// into a single .text, together with other .text$xy parts from libs.
+		// We don't need all them, only the first "main" part, so we break after processing the first ".text*" section
+		break;
 	} // for (sections)
+
+	// Just wait
+	printf("Press any key...\n");
+	getchar();
 
 	if (!dont_run)
 	{
+		char *coff_argv[] =
+		{
+			"COFF",
+			"-p",
+			"notepad.exe",
+			"-a",
+			NULL
+		};
+		int coff_argc = 4;
+
+		// Look up main()
+		// (!) Dump review shows that it's at offest 0.
+		// Fix argv/argc for it
+
+/*
 		start = (int(*)())(obj_buf + (pish + sect_idx)->PointerToRawData);
 		printf("start = %p\n", start);
 		start();
+*/
+		// (!) main() also needs to be called through a plug - it destroys caller's stack above return address
+
+/*
+		start_argv = (int(*)())(obj_buf + (pish + sect_idx)->PointerToRawData);
+		printf("start_argv = %p\n", start_argv);
+		start_argv(coff_argc, coff_argv);
+*/
+
+		// Copy plug and resolve its call
+		memcpy(imp_area + imp_area_offs, imp_plug, imp_plug_size);
+		*(uint64_t*)(imp_area + imp_area_offs + imp_plug_addr_offs) =
+			(uint64_t)(obj_buf + (pish + sect_idx)->PointerToRawData);
+
+		start_argv = (int(*)())(imp_area + imp_area_offs);
+		printf("start_argv = %p\n", start_argv);
+		start_argv(coff_argc, coff_argv);
+
+		imp_area_offs += imp_plug_size;
+	}
+	else
+	{
+		printf("	%u unresolved externals\n", num_unresolv);
 	}
 
 	return 0;
 }
-
 
 
 int main(int argc, char **argv)
@@ -572,7 +659,7 @@ int main(int argc, char **argv)
 		exit(-1);
 	}
 
-printf("%s():   obj_buf = %p, fProtect = %08X\n", __func__, obj_buf, PAGE_EXECUTE_READWRITE);
+//printf("%s():   obj_buf = %p, fProtect = %08X\n", __func__, obj_buf, PAGE_EXECUTE_READWRITE);
 
 	fread(obj_buf, 1, fsize, f);
 	fclose(f);
@@ -581,4 +668,25 @@ printf("%s():   obj_buf = %p, fProtect = %08X\n", __func__, obj_buf, PAGE_EXECUT
 
 printf("%s() ----------------------\n", __func__);
 	return 0;
+}
+
+
+// A function that just invokes some functions necessary to resolve in COFF so that we have them in runner.
+// It is not called
+void local_ext_resolver(void)
+{
+	HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+	THREADENTRY32 te;
+	te.dwSize = sizeof(THREADENTRY32);
+	HANDLE snapshot1 = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	PROCESSENTRY32 pe;
+	pe.dwSize = sizeof(PROCESSENTRY32);
+
+	for (Process32First(snapshot1, &pe); Process32Next(snapshot1, &pe);)
+	{
+	}
+
+	for (Thread32First(snapshot, &te); Thread32Next(snapshot, &te);)
+	{
+	}
 }
