@@ -5,6 +5,10 @@
 #include <stdint.h>
 #include <windows.h>
 #include <TlHelp32.h>
+#include <fcntl.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <io.h>
 
 /**
 Source: MSDN
@@ -107,7 +111,12 @@ struct _resolved_local resolved_locals[] =
 	{"__stdio_common_vsscanf", vsscanf},
 	{"get_errno", get_errno},
 	{"?_OptionsStorage@?1??__local_stdio_printf_options@@9@9", nop_func},
-	{"?_OptionsStorage@?1??__local_stdio_scanf_options@@9@9", nop_func}
+	{"?_OptionsStorage@?1??__local_stdio_scanf_options@@9@9", nop_func},
+	{"_open", _open},
+	{"_lseek", _lseek},
+	{"_tell", _tell},
+	{"_read", _read},
+	{"_close", _close}
 };
 
 const unsigned num_resolved_locals = sizeof(resolved_locals) / sizeof(resolved_locals[0]);
@@ -478,6 +487,11 @@ resolve_local:
 				// UNDEF
 
 				printf("Trying to resolve\n");
+
+				if (!strcmp(name, "sprintf"))
+				{
+					printf("Trying to resolve sprintf");
+				}
 
 				// TODO: Meanwhile we only have a single undef external and only one ref to it.
 				// Later we will need to keep a list of already resolved externals and pointer to end of imp area (growing)
